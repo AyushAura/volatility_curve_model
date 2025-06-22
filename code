@@ -1,0 +1,140 @@
+import torch
+import torch.nn as nn
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from arch import arch_model
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+
+# Part 1: LSTM-Attention Volatility Surface Reconstruction
+class LSTMAttentionIV(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=2):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
+        self.fc = nn.Linear(hidden_size, output_size)
+        self.dropout = nn.Dropout(0.3)
+        
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        lstm_out = self.dropout(lstm_out)
+        
+        # Attention mechanism
+        attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
+        context = torch.sum(attn_weights * lstm_out, dim=1)
+        
+        return self.fc(context)
+
+# Part 2: 1D CNN-Transformer Hybrid for Real-time Forecasting
+class ConvTransformer(nn.Module):
+    def __init__(self, input_channels, d_model, nhead, num_layers):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_channels, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(64, d_model, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
+        encoder_layers = TransformerEncoderLayer(d_model, nhead, dim_feedforward=512)
+        self.transformer = TransformerEncoder(encoder_layers, num_layers)
+        self.fc = nn.Linear(d_model, 1)
+        
+    def forward(self, x):
+        # x shape: (batch, features, timesteps)
+        conv_out = self.conv(x)
+        conv_out = conv_out.permute(2, 0, 1)  # (seq_len, batch, features)
+        transformer_out = self.transformer(conv_out)
+        return self.fc(transformer_out[-1])
+
+# Part 3: GJR-GARCH Integration
+class HybridGARCHLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+        
+    def forward(self, x, garch_residuals):
+        # Combine market features with GARCH residuals
+        combined = torch.cat([x, garch_residuals.unsqueeze(-1)], dim=-1)
+        lstm_out, _ = self.lstm(combined)
+        return self.fc(lstm_out[:, -1])
+
+# Custom Loss Function with Tail Risk Penalty
+class TailRiskAdjustedLoss(nn.Module):
+    def __init__(self, base_loss=nn.MSELoss(), alpha=0.3, quantile=0.95):
+        super().__init__()
+        self.base_loss = base_loss
+        self.alpha = alpha
+        self.quantile = quantile
+        
+    def forward(self, preds, targets):
+        base_loss = self.base_loss(preds, targets)
+        
+        # Calculate tail errors
+        errors = torch.abs(preds - targets)
+        tail_threshold = torch.quantile(errors, self.quantile)
+        tail_errors = errors[errors > tail_threshold]
+        
+        if len(tail_errors) > 0:
+            tail_penalty = torch.mean(tail_errors)
+            return base_loss + self.alpha * tail_penalty
+        return base_loss
+
+# Main System Integration
+class VolatilityForecastingSystem:
+    def __init__(self, device='cuda'):
+        self.device = device
+        self.surface_model = LSTMAttentionIV(input_size=42, hidden_size=128, output_size=45)
+        self.realtime_model = ConvTransformer(input_channels=42, d_model=128, nhead=8, num_layers=3)
+        self.risk_model = HybridGARCHLSTM(input_size=43, hidden_size=64)
+        self.loss_fn = TailRiskAdjustedLoss(alpha=0.4, quantile=0.97)
+        
+    def train(self, train_loader, epochs=100):
+        # Training logic would iterate through dataloader
+        # and update all three models
+        pass
+    
+    def predict(self, data):
+        # 1. Reconstruct volatility surface
+        surface_pred = self.surface_model(data['features'])
+        
+        # 2. Generate real-time forecasts
+        realtime_pred = self.realtime_model(data['high_freq'])
+        
+        # 3. Integrate GJR-GARCH residuals
+        garch_residuals = self._get_garch_residuals(data['returns'])
+        final_pred = self.risk_model(
+            torch.cat([surface_pred, realtime_pred], dim=1),
+            garch_residuals
+        )
+        return final_pred
+    
+    def _get_garch_residuals(self, returns):
+        # Fit GJR-GARCH model (using arch package)
+        model = arch_model(returns, vol='Garch', p=1, o=1, q=1, dist='StudentsT')
+        res = model.fit(update_freq=0, disp='off')
+        return torch.tensor(res.residuals / res.conditional_volatility, 
+                           dtype=torch.float32).to(self.device)
+
+# Example Usage
+if __name__ == "__main__":
+    # Initialize system
+    system = VolatilityForecastingSystem()
+    
+    # Load data (placeholder)
+    # train_data = load_parquet('train.parquet')
+    # test_data = load_parquet('test.parquet')
+    
+    # Train model (simplified)
+    # system.train(train_data_loader)
+    
+    # Generate predictions
+    # predictions = system.predict(test_data)
+    
+    # Save submission
+    # predictions.to_csv('submission.csv')
